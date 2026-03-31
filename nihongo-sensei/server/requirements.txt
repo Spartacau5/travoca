@@ -1,0 +1,5 @@
+pipecat-ai[deepgram,anthropic,elevenlabs,silero]==0.0.108
+azure-cognitiveservices-speech==1.38.0
+supabase==2.11.0
+python-dotenv==1.0.1
+aiohttp==3.10.11
