@@ -3,6 +3,7 @@
 import { useState, useCallback, useRef } from "react";
 import { PipecatClient, RTVIEvent } from "@pipecat-ai/client-js";
 import {
+  PipecatClientAudio,
   PipecatClientProvider,
   usePipecatClient,
   useRTVIClientEvent,
@@ -20,14 +21,29 @@ function VoiceControls({
   const [connected, setConnected] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [botSpeaking, setBotSpeaking] = useState(false);
+  const botBufferRef = useRef("");
 
-  useRTVIClientEvent(RTVIEvent.Connected, () => setConnected(true));
+  useRTVIClientEvent(RTVIEvent.Connected, () => {
+    setConnected(true);
+    setConnecting(false);
+  });
   useRTVIClientEvent(RTVIEvent.Disconnected, () => {
     setConnected(false);
     setConnecting(false);
+    botBufferRef.current = "";
   });
-  useRTVIClientEvent(RTVIEvent.BotStartedSpeaking, () => setBotSpeaking(true));
-  useRTVIClientEvent(RTVIEvent.BotStoppedSpeaking, () => setBotSpeaking(false));
+  useRTVIClientEvent(RTVIEvent.BotStartedSpeaking, () => {
+    setBotSpeaking(true);
+    botBufferRef.current = "";
+  });
+  useRTVIClientEvent(RTVIEvent.BotStoppedSpeaking, () => {
+    setBotSpeaking(false);
+    const text = botBufferRef.current.trim();
+    if (text) {
+      onTranscript({ role: "assistant", text, timestamp: Date.now() });
+      botBufferRef.current = "";
+    }
+  });
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   useRTVIClientEvent(RTVIEvent.UserTranscript, (data: any) => {
@@ -36,19 +52,20 @@ function VoiceControls({
     }
   });
 
+  // Accumulate bot text chunks — flushed as one bubble when BotStoppedSpeaking fires
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   useRTVIClientEvent(RTVIEvent.BotTranscript, (data: any) => {
     if (data?.text?.trim()) {
-      onTranscript({ role: "assistant", text: data.text, timestamp: Date.now() });
+      botBufferRef.current += (botBufferRef.current ? " " : "") + data.text.trim();
     }
   });
+
 
   const handleConnect = useCallback(async () => {
     if (!client) return;
     setConnecting(true);
     try {
-      // startBotAndConnect: POSTs to the endpoint, gets WebRTC params, connects
-      await client.startBotAndConnect({ endpoint: PIPECAT_URL });
+      await client.connect();
     } catch (e) {
       console.error("Connection failed:", e);
       setConnecting(false);
@@ -105,7 +122,9 @@ export function VoiceAgent({
 }) {
   const clientRef = useRef<PipecatClient>(
     new PipecatClient({
-      transport: new SmallWebRTCTransport(),
+      transport: new SmallWebRTCTransport({
+        webrtcUrl: `${PIPECAT_URL}/api/offer`,
+      }),
       enableMic: true,
       enableCam: false,
     })
@@ -113,6 +132,7 @@ export function VoiceAgent({
 
   return (
     <PipecatClientProvider client={clientRef.current}>
+      <PipecatClientAudio />
       <VoiceControls onTranscript={onTranscript} />
     </PipecatClientProvider>
   );

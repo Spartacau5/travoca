@@ -1,7 +1,12 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { VoiceAgent } from "@/components/VoiceAgent";
+import dynamic from "next/dynamic";
+// VoiceAgent uses WebRTC — must be client-only, no SSR
+const VoiceAgent = dynamic(
+  () => import("@/components/VoiceAgent").then((m) => ({ default: m.VoiceAgent })),
+  { ssr: false }
+);
 import { LessonPanel } from "@/components/LessonPanel";
 import { TranscriptView } from "@/components/TranscriptView";
 import { ProgressBar } from "@/components/ProgressBar";

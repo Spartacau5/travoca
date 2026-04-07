@@ -37,12 +37,16 @@ export function LessonPanel({ lesson }: { lesson: Lesson | null }) {
               <h3 className="text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2">
                 Vocabulary
               </h3>
-              <div className="space-y-1">
+              <div className="space-y-2">
                 {lesson.vocabulary.map((v) => (
-                  <div key={v.word} className="flex items-baseline gap-2 text-sm">
-                    <span className="text-white font-medium">{v.word}</span>
-                    <span className="text-slate-500 text-xs">({v.reading})</span>
-                    <span className="text-slate-400 text-xs">— {v.meaning}</span>
+                  <div key={v.word} className="flex items-start gap-3 text-sm">
+                    <div className="min-w-0">
+                      <span className="text-white font-bold text-base">{v.word}</span>
+                      {v.reading !== v.word && (
+                        <span className="text-slate-400 text-xs ml-1">({v.reading})</span>
+                      )}
+                      <span className="block text-green-400 text-xs mt-0.5">{v.meaning}</span>
+                    </div>
                   </div>
                 ))}
               </div>

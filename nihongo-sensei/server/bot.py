@@ -1,19 +1,15 @@
 """
 Nihongo Sensei - Pipecat voice pipeline
 Run with: python bot.py
-
-Pipeline: Audio In -> Deepgram STT -> Teaching Brain -> Claude LLM -> ElevenLabs TTS -> Audio Out
-
-Uses FastAPI + SmallWebRTCRequestHandler (pipecat 0.0.108 API).
-The client connects by POSTing a WebRTC offer to /api/offer.
 """
 
+import asyncio
 import os
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 
 import uvicorn
-from fastapi import BackgroundTasks, FastAPI
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -27,19 +23,19 @@ from pipecat.transports.smallwebrtc.request_handler import (
     SmallWebRTCRequest,
     SmallWebRTCRequestHandler,
 )
+from pipecat.transports.base_transport import TransportParams
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.anthropic.llm import AnthropicLLMService
 from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
-from processors.teaching_brain import TeachingBrainProcessor
+
+from processors.teaching_brain import TeachingBrainProcessor, ResponseRecorder
 from processors.lesson_manager import LessonManager
 from processors.transcript_logger import TranscriptLogger
 from curriculum.lessons import get_all_lessons
 from config import settings
 
 load_dotenv()
-
-# --- HTTP Server ---
 
 small_webrtc_handler = SmallWebRTCRequestHandler()
 
@@ -52,27 +48,61 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # dev only
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
 @app.get("/lessons")
 async def list_lessons():
-    """Return the full lesson list so the client can display the current lesson."""
     return JSONResponse(content=get_all_lessons())
 
 
 @app.post("/api/offer")
-async def offer(request: SmallWebRTCRequest, background_tasks: BackgroundTasks):
-    """Handle WebRTC offer from the browser client."""
-
+async def offer(request: SmallWebRTCRequest):
     async def webrtc_connection_callback(connection: SmallWebRTCConnection):
-        background_tasks.add_task(run_bot, connection)
+        # Build everything synchronously here, BEFORE the HTTP response is sent.
+        # This ensures event handlers are registered on the connection before
+        # ICE completes (which can happen immediately after the response is sent).
+        transport = SmallWebRTCTransport(
+            webrtc_connection=connection,
+            params=TransportParams(
+                audio_in_enabled=True,
+                audio_out_enabled=True,
+                vad_enabled=True,
+                vad_analyzer=SileroVADAnalyzer(),
+            ),
+        )
+
+        lesson_manager = LessonManager()
+        teaching_brain = TeachingBrainProcessor(lesson_manager=lesson_manager)
+        response_recorder = ResponseRecorder(teaching_brain=teaching_brain)
+        transcript_logger = TranscriptLogger()
+
+        # task_ref lets the disconnect handler cancel the pipeline
+        task_ref: list[PipelineTask] = []
+
+        @transport.event_handler("on_client_connected")
+        async def on_connected(_transport, _client):
+            print("Learner connected! Starting lesson...")
+            try:
+                await teaching_brain.start_lesson()
+            except Exception as e:
+                import traceback
+                print(f"[start_lesson ERROR] {e}")
+                traceback.print_exc()
+
+        @transport.event_handler("on_client_disconnected")
+        async def on_disconnected(_transport, _client):
+            print("Learner disconnected. Saving progress...")
+            try:
+                await teaching_brain.end_session()
+            except Exception as e:
+                print(f"[end_session ERROR] {e}")
+            if task_ref:
+                await task_ref[0].cancel()
+
+        asyncio.create_task(
+            run_pipeline(transport, teaching_brain, response_recorder, transcript_logger, task_ref)
+        )
 
     answer = await small_webrtc_handler.handle_web_request(
         request=request,
@@ -83,91 +113,76 @@ async def offer(request: SmallWebRTCRequest, background_tasks: BackgroundTasks):
 
 @app.patch("/api/offer")
 async def ice_candidate(request: SmallWebRTCPatchRequest):
-    """Handle ICE candidate trickling."""
     await small_webrtc_handler.handle_patch_request(request)
     return {"status": "ok"}
 
 
-# --- Bot pipeline (runs once per WebRTC connection) ---
+async def run_pipeline(
+    transport: SmallWebRTCTransport,
+    teaching_brain: TeachingBrainProcessor,
+    response_recorder: ResponseRecorder,
+    transcript_logger: TranscriptLogger,
+    task_ref: list,
+):
+    print("[run_pipeline] Task started")
+    try:
+        print("[run_pipeline] Creating services...")
+        stt = DeepgramSTTService(
+            api_key=os.getenv("DEEPGRAM_API_KEY"),
+            settings=DeepgramSTTService.Settings(
+                model="nova-3",
+                language="multi",
+                smart_format=True,
+            ),
+        )
+        print("[run_pipeline] STT created")
 
-async def run_bot(webrtc_connection: SmallWebRTCConnection):
-    from pipecat.transports.base_transport import TransportParams
+        llm = AnthropicLLMService(
+            api_key=os.getenv("ANTHROPIC_API_KEY"),
+            settings=AnthropicLLMService.Settings(
+                model="claude-sonnet-4-6",
+                max_tokens=300,
+                temperature=0.7,
+            ),
+        )
+        print("[run_pipeline] LLM created")
 
-    transport_params = TransportParams(
-        audio_in_enabled=True,
-        audio_out_enabled=True,
-        vad_enabled=True,
-        vad_analyzer=SileroVADAnalyzer(),
-    )
+        tts = ElevenLabsTTSService(
+            api_key=os.getenv("ELEVENLABS_API_KEY"),
+            settings=ElevenLabsTTSService.Settings(
+                voice=os.getenv("ELEVENLABS_VOICE_ID", "pFZP5JQG7iQjIQuC4Bku"),
+                model="eleven_turbo_v2_5",
+                language="ja",
+            ),
+        )
+        print("[run_pipeline] TTS created")
 
-    transport = SmallWebRTCTransport(
-        webrtc_connection=webrtc_connection,
-        params=transport_params,
-    )
+        pipeline = Pipeline([
+            transport.input(),
+            stt,
+            teaching_brain,
+            llm,
+            response_recorder,
+            tts,
+            transport.output(),
+            transcript_logger,
+        ])
 
-    stt = DeepgramSTTService(
-        api_key=os.getenv("DEEPGRAM_API_KEY"),
-        params=DeepgramSTTService.InputParams(
-            model="nova-3",
-            language="multi",
-            smart_format=True,
-        ),
-    )
+        task = PipelineTask(
+            pipeline,
+            params=PipelineParams(allow_interruptions=True, enable_metrics=True),
+        )
+        task_ref.append(task)
+        print("[run_pipeline] Starting runner...")
 
-    llm = AnthropicLLMService(
-        api_key=os.getenv("ANTHROPIC_API_KEY"),
-        model="claude-sonnet-4-6",
-        params=AnthropicLLMService.InputParams(
-            max_tokens=300,
-            temperature=0.7,
-        ),
-    )
+        runner = PipelineRunner(handle_sigint=False)
+        await runner.run(task)
+        print("[run_pipeline] Runner finished")
 
-    tts = ElevenLabsTTSService(
-        api_key=os.getenv("ELEVENLABS_API_KEY"),
-        voice_id=os.getenv("ELEVENLABS_VOICE_ID"),
-        params=ElevenLabsTTSService.InputParams(
-            model="eleven_multilingual_v2",
-            language="ja",
-            optimize_streaming_latency=3,
-        ),
-    )
-
-    lesson_manager = LessonManager()
-    teaching_brain = TeachingBrainProcessor(lesson_manager=lesson_manager)
-    transcript_logger = TranscriptLogger()
-
-    pipeline = Pipeline([
-        transport.input(),
-        stt,
-        teaching_brain,
-        llm,
-        tts,
-        transport.output(),
-        transcript_logger,
-    ])
-
-    task = PipelineTask(
-        pipeline,
-        PipelineParams(
-            allow_interruptions=True,
-            enable_metrics=True,
-        ),
-    )
-
-    @transport.event_handler("on_client_connected")
-    async def on_connected(transport, client):
-        print("Learner connected! Starting lesson...")
-        await teaching_brain.start_lesson()
-
-    @transport.event_handler("on_client_disconnected")
-    async def on_disconnected(transport, client):
-        print("Learner disconnected. Saving progress...")
-        await teaching_brain.end_session()
-        await task.cancel()
-
-    runner = PipelineRunner(handle_sigint=False)
-    await runner.run(task)
+    except Exception as e:
+        import traceback
+        print(f"[pipeline ERROR] {e}")
+        traceback.print_exc()
 
 
 if __name__ == "__main__":

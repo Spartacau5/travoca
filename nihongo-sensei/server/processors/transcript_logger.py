@@ -1,4 +1,4 @@
-from pipecat.frames.frames import Frame, TranscriptionFrame, TextFrame
+from pipecat.frames.frames import Frame, TranscriptionFrame
 from pipecat.processors.frame_processor import FrameProcessor
 
 
@@ -13,7 +13,5 @@ class TranscriptLogger(FrameProcessor):
 
         if isinstance(frame, TranscriptionFrame):
             print(f"[Learner] {frame.text}")
-        elif isinstance(frame, TextFrame):
-            print(f"[Yuki] {frame.text}")
 
         await self.push_frame(frame, direction)

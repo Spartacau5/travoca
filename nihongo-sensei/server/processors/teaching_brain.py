@@ -5,9 +5,10 @@ from pipecat.frames.frames import (
     Frame,
     TranscriptionFrame,
     LLMMessagesFrame,
+    LLMFullResponseEndFrame,
     TextFrame,
 )
-from pipecat.processors.frame_processor import FrameProcessor
+from pipecat.processors.frame_processor import FrameProcessor, FrameDirection
 
 from prompts.sensei import build_system_prompt
 from services.supabase_client import SupabaseClient
@@ -93,7 +94,7 @@ class TeachingBrainProcessor(FrameProcessor):
         )
 
         messages = [
-            {"role": "user", "content": system_prompt},
+            {"role": "system", "content": system_prompt},
             *self.conversation_history,
         ]
 
@@ -111,3 +112,32 @@ class TeachingBrainProcessor(FrameProcessor):
     def _avg_pronunciation(self) -> Optional[float]:
         scores = self.session_data["pronunciation_scores"]
         return sum(scores) / len(scores) if scores else None
+
+    def record_assistant_response(self, text: str):
+        """Called by ResponseRecorder after LLM response completes."""
+        if text.strip():
+            self.conversation_history.append({"role": "assistant", "content": text.strip()})
+
+
+class ResponseRecorder(FrameProcessor):
+    """Sits between LLM and TTS. Accumulates text chunks and records the
+    complete assistant response back to TeachingBrainProcessor when done."""
+
+    def __init__(self, teaching_brain: "TeachingBrainProcessor", **kwargs):
+        super().__init__(**kwargs)
+        self._brain = teaching_brain
+        self._buffer: list[str] = []
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
+        if isinstance(frame, TextFrame):
+            self._buffer.append(frame.text)
+        elif isinstance(frame, LLMFullResponseEndFrame):
+            full_text = "".join(self._buffer).strip()
+            if full_text:
+                self._brain.record_assistant_response(full_text)
+                print(f"[Yuki] {full_text}")
+            self._buffer = []
+
+        await self.push_frame(frame, direction)
