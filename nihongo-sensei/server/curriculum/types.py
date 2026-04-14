@@ -4,6 +4,7 @@ from typing import TypedDict, Optional
 class VocabEntry(TypedDict):
     word: str
     reading: str
+    romaji: str
     meaning: str
     example: str
     example_translation: str

@@ -19,9 +19,10 @@ LESSON_COMPLETE_PATTERN = re.compile(r"LESSON_COMPLETE:\s*(\{.*?\})", re.DOTALL)
 
 
 class TeachingBrainProcessor(FrameProcessor):
-    def __init__(self, lesson_manager, **kwargs):
+    def __init__(self, lesson_manager, override_lesson_id: str | None = None, **kwargs):
         super().__init__(**kwargs)
         self.lesson_manager = lesson_manager
+        self._override_lesson_id = override_lesson_id
         self.db = SupabaseClient()
         self.gamification = GamificationEngine()
         self.conversation_history: list[dict] = []
@@ -37,7 +38,7 @@ class TeachingBrainProcessor(FrameProcessor):
     async def start_lesson(self):
         """Called when learner connects. Load state and begin."""
         self.user_progress = await self.db.get_user_progress(DEV_USER_ID)
-        current_lesson_id = await self.db.get_current_lesson_id(DEV_USER_ID)
+        current_lesson_id = self._override_lesson_id or await self.db.get_current_lesson_id(DEV_USER_ID)
         self.current_lesson = self.lesson_manager.load_lesson(current_lesson_id)
         self.session_id = await self.db.create_session(DEV_USER_ID, current_lesson_id)
         self.conversation_history = []
@@ -48,9 +49,7 @@ class TeachingBrainProcessor(FrameProcessor):
         self.conversation_history.append({
             "role": "user",
             "content": (
-                "[SYSTEM: The student just joined the lesson. Greet them warmly, "
-                "introduce today's lesson topic briefly, and begin the roleplay scenario. "
-                "Keep it under 3 sentences.]"
+                "[SYSTEM: The student just joined. Say hi in 1 sentence and ask them to greet you in Japanese. Nothing more.]"
             ),
         })
         await self._emit_messages()
@@ -75,7 +74,20 @@ class TeachingBrainProcessor(FrameProcessor):
                 return
 
             self.session_data["turn_count"] += 1
-            self.conversation_history.append({"role": "user", "content": user_text})
+
+            # If the last entry in history is also a user message (bot was interrupted
+            # before finishing its response, so ResponseRecorder never added an assistant
+            # turn), REPLACE it with the newer message instead of appending.
+            # This prevents consecutive user messages from confusing Claude and ensures
+            # the bot only responds to the learner's latest utterance.
+            if (
+                self.conversation_history
+                and self.conversation_history[-1].get("role") == "user"
+            ):
+                self.conversation_history[-1] = {"role": "user", "content": user_text}
+            else:
+                self.conversation_history.append({"role": "user", "content": user_text})
+
             self._check_vocab_usage(user_text)
             await self._emit_messages()
 

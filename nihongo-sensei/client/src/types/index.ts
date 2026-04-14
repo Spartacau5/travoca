@@ -1,6 +1,7 @@
 export interface VocabEntry {
   word: string;
   reading: string;
+  romaji: string;
   meaning: string;
   example: string;
   example_translation: string;

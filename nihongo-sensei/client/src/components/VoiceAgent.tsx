@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import { PipecatClient, RTVIEvent } from "@pipecat-ai/client-js";
 import {
   PipecatClientAudio,
@@ -115,25 +115,59 @@ function VoiceControls({
   );
 }
 
-export function VoiceAgent({
+function VoiceAgentInner({
   onTranscript,
+  lessonId,
 }: {
   onTranscript: (entry: TranscriptEntry) => void;
+  lessonId?: string;
 }) {
-  const clientRef = useRef<PipecatClient>(
-    new PipecatClient({
-      transport: new SmallWebRTCTransport({
-        webrtcUrl: `${PIPECAT_URL}/api/offer`,
-      }),
-      enableMic: true,
-      enableCam: false,
-    })
+  const url = lessonId
+    ? `${PIPECAT_URL}/api/offer?lesson_id=${encodeURIComponent(lessonId)}`
+    : `${PIPECAT_URL}/api/offer`;
+
+  const [client] = useState(
+    () =>
+      new PipecatClient({
+        transport: new SmallWebRTCTransport({ webrtcUrl: url }),
+        enableMic: true,
+        enableCam: false,
+      })
   );
 
+  // Disconnect when this component unmounts (lesson changed)
+  useEffect(() => {
+    return () => {
+      try {
+        client.disconnect();
+      } catch {
+        // ignore — may already be disconnected
+      }
+    };
+  }, [client]);
+
   return (
-    <PipecatClientProvider client={clientRef.current}>
+    <PipecatClientProvider client={client}>
       <PipecatClientAudio />
       <VoiceControls onTranscript={onTranscript} />
     </PipecatClientProvider>
+  );
+}
+
+export function VoiceAgent({
+  onTranscript,
+  lessonId,
+}: {
+  onTranscript: (entry: TranscriptEntry) => void;
+  lessonId?: string;
+}) {
+  // key={lessonId} forces full remount when lesson changes,
+  // which disconnects the old session and creates a fresh client
+  return (
+    <VoiceAgentInner
+      key={lessonId}
+      onTranscript={onTranscript}
+      lessonId={lessonId}
+    />
   );
 }
